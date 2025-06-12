@@ -53,15 +53,17 @@ void v_print(int mode, int len) { // mode: begin=0, progress = 1
 			dur = now - started;
 			done = size-len;
 			if (done > 0 && reported != now) {
-				printf("Bytes: %d (%d%c),  Time: %d, ETA: %d   \r",done,
-						(done * 100) / size, '%', dur, (int) ((1.0 * dur * size) / done-dur));
+                                printf("Bytes: %u (%u%c),  Time: %u, ETA: %u   \r", done,
+                                                (done * 100) / size, '%', dur,
+                                                (unsigned int)((1.0 * dur * size) / done - dur));
 				fflush(stdout);
 				reported = now;
 			}
 			break;
 		case 2: // done
-			dur = now - started; if (dur<1) dur=1;
-			printf("Total:  %d sec,  average speed  %d  bytes per second.\n", dur, size / dur);
+                        dur = now - started; if (dur < 1) dur = 1;
+                        printf("Total:  %u sec,  average speed  %u  bytes per second.\n",
+                               dur, size / dur);
 			break;
 		default:
 			break;
@@ -71,9 +73,9 @@ void v_print(int mode, int len) { // mode: begin=0, progress = 1
 int main(int argc, char* argv[])
 {
     int32_t ret;
-    uint8_t *buf;
+    uint8_t *buf = NULL;
     FILE *fp;
-    char *filename;
+    char *filename = NULL;
     int cap;
     int length = 0;
     char op = 0;
@@ -125,8 +127,11 @@ int main(int argc, char* argv[])
                 case 'r':
                     if (!op) {
                         op = c;
-                        filename = (char*) malloc(strlen(optarg) + 1);
-                        strcpy(filename, optarg);
+                        filename = strdup(optarg);
+                        if (!filename) {
+                            perror("strdup");
+                            goto out;
+                        }
                     } else
                         op = 'x';
                     break;
@@ -219,59 +224,38 @@ int main(int argc, char* argv[])
         ret = fread(buf, 1, cap, fp);
         if (ferror(fp)) {
             fprintf(stderr, "Error reading file [%s]\n", filename);
-            if (fp)
-                fclose(fp);
+            fclose(fp);
             goto out;
         }
         cap = ret;
         fprintf(stderr, "File Size is [%d]\n", ret);
         ret = ch341SpiWrite(buf, offset, ret);
         if (ret == 0) {
-            printf("\nWrite ok! Try to verify... ");
-            FILE *test_file;
-            char *test_filename;
-            test_filename = (char*) malloc(strlen("./test-firmware.bin") + 1);
-            strcpy(test_filename, "./test-firmware.bin");
-
-            ret = ch341SpiRead(buf, offset, cap);
-            test_file = fopen(test_filename, "w+b");
-
-            if (!test_file) {
-                fprintf(stderr, "Couldn't open file %s for writing.\n", test_filename);
-                goto out;
+            printf("\nWrite ok! Verifying... ");
+            uint8_t *verify_buf = (uint8_t *)malloc(cap);
+            if (!verify_buf) {
+                fprintf(stderr, "Malloc failed for verify buffer.\n");
+                goto out_fp;
             }
-            fwrite(buf, 1, cap, test_file);
-
-            if (ferror(test_file))
-                fprintf(stderr, "Error writing file [%s]\n", test_filename);
-
-            fseek(fp, 0, SEEK_SET);
-            fseek(test_file, 0, SEEK_SET);
-
-            int ch1, ch2;
-            int checked_count = 0;
-            ch1 = getc(fp);
-            ch2 = getc(test_file);
-
-            while ((ch1 != EOF) && (ch2 != EOF) && (ch1 == ch2)) {
-                ch1 = getc(fp);
-                ch2 = getc(test_file);
-                checked_count++;
+            ret = ch341SpiRead(verify_buf, offset, cap);
+            if (ret < 0) {
+                free(verify_buf);
+                goto out_fp;
             }
-
-            if (ch1 == ch2 || (checked_count == cap))
-                printf("\nWrite completed successfully. \n");
+            if (memcmp(buf, verify_buf, cap) == 0)
+                printf("\nWrite completed successfully.\n");
             else
-                printf("\nError while writing. Check your device. May be it need to be erased.\n");
-
-            if (remove(test_filename) == 0)
-                printf("\nAll done. \n");
-            else
-                printf("\nTemp file could not be deleted");
+                printf("\nError while writing. Check your device. Maybe it needs to be erased.\n");
+            free(verify_buf);
         }
+out_fp:
         fclose(fp);
     }
 out:
+    if (buf)
+        free(buf);
+    if (filename)
+        free(filename);
     ch341Release();
     return 0;
 }
