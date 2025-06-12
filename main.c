@@ -53,15 +53,17 @@ void v_print(int mode, int len) { // mode: begin=0, progress = 1
 			dur = now - started;
 			done = size-len;
 			if (done > 0 && reported != now) {
-				printf("Bytes: %d (%d%c),  Time: %d, ETA: %d   \r",done,
-						(done * 100) / size, '%', dur, (int) ((1.0 * dur * size) / done-dur));
+                                printf("Bytes: %u (%u%c),  Time: %u, ETA: %u   \r", done,
+                                                (done * 100) / size, '%', dur,
+                                                (unsigned int)((1.0 * dur * size) / done - dur));
 				fflush(stdout);
 				reported = now;
 			}
 			break;
 		case 2: // done
-			dur = now - started; if (dur<1) dur=1;
-			printf("Total:  %d sec,  average speed  %d  bytes per second.\n", dur, size / dur);
+                        dur = now - started; if (dur < 1) dur = 1;
+                        printf("Total:  %u sec,  average speed  %u  bytes per second.\n",
+                               dur, size / dur);
 			break;
 		default:
 			break;
@@ -222,8 +224,7 @@ int main(int argc, char* argv[])
         ret = fread(buf, 1, cap, fp);
         if (ferror(fp)) {
             fprintf(stderr, "Error reading file [%s]\n", filename);
-            if (fp)
-                fclose(fp);
+            fclose(fp);
             goto out;
         }
         cap = ret;

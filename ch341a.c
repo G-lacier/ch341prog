@@ -45,7 +45,7 @@ void sig_int(int signo)
 /* Configure CH341A, find the device and set the default interface. */
 int32_t ch341Configure(uint16_t vid, uint16_t pid)
 {
-    struct libusb_device *dev;
+    const struct libusb_device *dev;
     int32_t ret;
     struct sigaction sa;
 
@@ -206,11 +206,11 @@ void ch341SpiCs(uint8_t *ptr, bool selected)
 }
 
 /* transfer len bytes of data to the spi device */
-int32_t ch341SpiStream(uint8_t *out, uint8_t *in, uint32_t len)
+int32_t ch341SpiStream(const uint8_t *out, uint8_t *in, uint32_t len)
 {
-    uint8_t inBuf[CH341_PACKET_LENGTH], outBuf[CH341_PACKET_LENGTH], *inPtr, *outPtr;
-    int32_t ret, packetLen;
-    bool done;
+    uint8_t inBuf[CH341_PACKET_LENGTH], outBuf[CH341_PACKET_LENGTH];
+    uint8_t *inPtr;
+    int32_t ret;
 
     if (devHandle == NULL) return -1;
 
@@ -219,27 +219,28 @@ int32_t ch341SpiStream(uint8_t *out, uint8_t *in, uint32_t len)
     if (ret < 0) return -1;
 
     inPtr = in;
-
     do {
-        done=true;
-        packetLen=len+1;    // STREAM COMMAND + data length
-        if (packetLen>CH341_PACKET_LENGTH) {
-            packetLen=CH341_PACKET_LENGTH;
-            done=false;
+        bool done = true;
+        int packetLen = len + 1;    // STREAM COMMAND + data length
+        if (packetLen > CH341_PACKET_LENGTH) {
+            packetLen = CH341_PACKET_LENGTH;
+            done = false;
         }
-        outPtr = outBuf;
+        uint8_t *outPtr = outBuf;
         *outPtr++ = CH341A_CMD_SPI_STREAM;
-        for (int i = 0; i < packetLen-1; ++i)
+        for (int i = 0; i < packetLen - 1; ++i)
             *outPtr++ = swapByte(*out++);
         ret = usbTransfer(__func__, BULK_WRITE_ENDPOINT, outBuf, packetLen);
         if (ret < 0) return -1;
-        ret = usbTransfer(__func__, BULK_READ_ENDPOINT, inBuf, packetLen-1);
+        ret = usbTransfer(__func__, BULK_READ_ENDPOINT, inBuf, packetLen - 1);
         if (ret < 0) return -1;
         len -= ret;
 
         for (int i = 0; i < ret; ++i) // swap the buffer
             *inPtr++ = swapByte(inBuf[i]);
-    } while (!done);
+        if (done)
+            break;
+    } while (1);
 
     ch341SpiCs(outBuf, false);
     ret = usbTransfer(__func__, BULK_WRITE_ENDPOINT, outBuf, 3);
@@ -401,9 +402,7 @@ int32_t ch341SpiRead(uint8_t *buf, uint32_t add, uint32_t len)
         - CH341_MAX_PACKETS + 1 - 4 - (fourbyte? 1: 0);
     uint32_t pkg_len, pkg_count;
     struct libusb_transfer *xferBulkIn, *xferBulkOut;
-    uint32_t idx = 0;
-    uint32_t ret;
-    int32_t old_counter;
+    int32_t ret = 0;
     struct timeval tv = {0, 100};
     struct spi_transfer_in bulk_in = {};
 
@@ -418,10 +417,10 @@ int32_t ch341SpiRead(uint8_t *buf, uint32_t add, uint32_t len)
 
     printf("Read started!\n");
     while (len > 0) {
+        uint32_t idx = CH341_PACKET_LENGTH + 1;
         v_print( 1, len); // verbose
         fflush(stdout);
         ch341SpiCs(out, true);
-        idx = CH341_PACKET_LENGTH + 1;
         out[idx++] = swapByte(fourbyte? 0x13: 0x03);
         if (fourbyte)
             out[idx++] = swapByte(add >> 24);
@@ -449,7 +448,7 @@ int32_t ch341SpiRead(uint8_t *buf, uint32_t add, uint32_t len)
         libusb_fill_bulk_transfer(xferBulkOut, devHandle, BULK_WRITE_ENDPOINT, out,
                 pkg_len, cbBulkOut, NULL, DEFAULT_TIMEOUT);
         libusb_submit_transfer(xferBulkOut);
-        old_counter = bulk_in.bulk_count;
+        int32_t old_counter = bulk_in.bulk_count;
         while (bulk_in.bulk_count < pkg_count) {
             libusb_handle_events_timeout(NULL, &tv);
             if (bulk_in.bulk_count == -1) { // encountered error
@@ -458,14 +457,16 @@ int32_t ch341SpiRead(uint8_t *buf, uint32_t add, uint32_t len)
                 break;
             }
             if (old_counter != bulk_in.bulk_count) { // new package came
-                if (bulk_in.bulk_count != pkg_count)
+                if ((bulk_in.bulk_count + 1) <= pkg_count)
                     libusb_submit_transfer(xferBulkIn);  // resubmit bulk in request
                 old_counter = bulk_in.bulk_count;
             }
         }
         ch341SpiCs(out, false);
-        ret = usbTransfer(__func__, BULK_WRITE_ENDPOINT, out, 3);
-        if (ret < 0) break;
+        if (ret >= 0) {
+            ret = usbTransfer(__func__, BULK_WRITE_ENDPOINT, out, 3);
+            if (ret < 0) break;
+        }
         if (force_stop == 1) { // user hit ctrl+C
             force_stop = 0;
             if (len > 0)
@@ -481,15 +482,12 @@ int32_t ch341SpiRead(uint8_t *buf, uint32_t add, uint32_t len)
 
 #define WRITE_PAYLOAD_LENGTH 301 // 301 is the length of a page(256)'s data with protocol overhead
 /* write buffer(*buf) to SPI flash */
-int32_t ch341SpiWrite(uint8_t *buf, uint32_t add, uint32_t len)
+int32_t ch341SpiWrite(const uint8_t *buf, uint32_t add, uint32_t len)
 {
     uint8_t out[WRITE_PAYLOAD_LENGTH];
     uint8_t in[CH341_PACKET_LENGTH];
-    uint32_t tmp, pkg_count;
     struct libusb_transfer *xferBulkIn, *xferBulkOut;
-    uint32_t idx = 0;
-    uint32_t ret;
-    int32_t old_counter;
+    int32_t ret = 0;
     struct timeval tv = {0, 100};
     bool fourbyte = (add + len) > (1 << 24);
     struct spi_transfer_in bulk_in = { .read_buffer = NULL };
@@ -506,9 +504,12 @@ int32_t ch341SpiWrite(uint8_t *buf, uint32_t add, uint32_t len)
         v_print(1, len);
 
         out[0] = 0x06; // Write enable
-        ret = ch341SpiStream(out, in, 1);
+        if (ch341SpiStream(out, in, 1) < 0) {
+            ret = -1;
+            break;
+        }
         ch341SpiCs(out, true);
-        idx = CH341_PACKET_LENGTH;
+        uint32_t idx = CH341_PACKET_LENGTH;
         out[idx++] = CH341A_CMD_SPI_STREAM;
         out[idx++] = swapByte(fourbyte? 0x12: 0x02);
         if (fourbyte)
@@ -517,8 +518,8 @@ int32_t ch341SpiWrite(uint8_t *buf, uint32_t add, uint32_t len)
         out[idx++] = swapByte(add >> 8);
         out[idx++] = swapByte(add);
 
-        tmp = 0;
-        pkg_count = 1;
+        uint32_t tmp = 0;
+        uint32_t pkg_count = 1;
 
         while ((idx < WRITE_PAYLOAD_LENGTH) && (len > tmp)) {
             if (idx % CH341_PACKET_LENGTH == 0) {
@@ -540,7 +541,7 @@ int32_t ch341SpiWrite(uint8_t *buf, uint32_t add, uint32_t len)
         libusb_fill_bulk_transfer(xferBulkOut, devHandle, BULK_WRITE_ENDPOINT, out,
                 idx, cbBulkOut, NULL, DEFAULT_TIMEOUT);
         libusb_submit_transfer(xferBulkOut);
-        old_counter = bulk_in.bulk_count;
+        int32_t old_counter = bulk_in.bulk_count;
         ret = 0;
         while (bulk_in.bulk_count < pkg_count) {
             libusb_handle_events_timeout(NULL, &tv);
@@ -549,7 +550,7 @@ int32_t ch341SpiWrite(uint8_t *buf, uint32_t add, uint32_t len)
                 break;
             }
             if (old_counter != bulk_in.bulk_count) { // new package came
-                if (bulk_in.bulk_count != pkg_count)
+                if ((bulk_in.bulk_count + 1) <= pkg_count)
                     libusb_submit_transfer(xferBulkIn);  // resubmit bulk in request
                 old_counter = bulk_in.bulk_count;
             }
